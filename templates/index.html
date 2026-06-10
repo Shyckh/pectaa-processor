@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Universal Bulk Photo Processor</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; color: #333; margin: 0; padding: 20px; }
+        .container { max-width: 700px; margin: 30px auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); position: relative; }
+        h1 { color: #1e3a8a; text-align: center; margin-bottom: 5px; font-size: 26px; }
+        p.subtitle { text-align: center; color: #666; margin-bottom: 25px; font-size: 14px; }
+        
+        .options-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 25px; background: #f8fafc; padding: 15px; border-radius: 6px; border: 1px solid #e2e8f0; }
+        .option-field { display: flex; flex-direction: column; }
+        .option-field label { font-size: 12px; font-weight: bold; color: #475569; margin-bottom: 5px; text-transform: uppercase; }
+        .option-field input { padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 14px; text-align: center; font-weight: bold; }
+        
+        .upload-box { border: 2px dashed #3b82f6; border-radius: 6px; padding: 40px 20px; text-align: center; background: #eff6ff; cursor: pointer; transition: 0.2s; }
+        .upload-box:hover { background: #dbeafe; }
+        .upload-box.has-files { border-color: #10b981; background: #ecfdf5; }
+        
+        .btn { display: block; width: 100%; background: #2563eb; color: white; border: none; padding: 14px; margin-top: 20px; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; }
+        .btn:hover { background: #1d4ed8; }
+        
+        .ad-space { background: #eee; text-align: center; padding: 15px; margin: 20px 0; color: #999; font-size: 12px; border: 1px solid #ddd; border-radius: 4px; }
+        #file-status { margin-top: 10px; font-weight: bold; color: #1e3a8a; }
+
+        /* LOADING SCREEN OVERLAY STYLES */
+        .loading-overlay {
+            display: none;
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 8px;
+            z-index: 10;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #2563eb;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .loading-text { margin-top: 20px; font-size: 18px; font-weight: bold; color: #1e3a8a; text-align: center; }
+        
+        /* Highlighted Time Remaining Alert Box */
+        .time-counter {
+            margin-top: 12px;
+            background: #fef3c7;
+            color: #92400e;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            border: 1px solid #fde68a;
+        }
+        
+        .loading-subtext { margin-top: 12px; font-size: 13px; color: #666; text-align: center; padding: 0 40px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div class="loading-text">AI is Processing Your Photos...</div>
+        
+        <div class="time-counter" id="timeRemainingBox">Estimated time: Calculating...</div>
+        
+        <div class="loading-subtext">Removing backgrounds, resizing layout options, and running smart compression matrices. Please keep this page open.</div>
+    </div>
+
+    <h1>Universal Bulk Photo Processor</h1>
+    <p class="subtitle">Set your required settings, upload your photos, and let AI do the rest instantly.</p>
+
+    <div class="ad-space">
+        [Google Advertisement - Top Banner]
+    </div>
+
+    <form id="uploadForm" action="/process_bulk" method="post" enctype="multipart/form-data">
+        <div class="options-grid">
+            <div class="option-field">
+                <label>Width (Pixels)</label>
+                <input type="number" name="width" value="600" min="100" max="3000" required>
+            </div>
+            <div class="option-field">
+                <label>Height (Pixels)</label>
+                <input type="number" name="height" value="800" min="100" max="3000" required>
+            </div>
+            <div class="option-field">
+                <label>Max Size (KB)</label>
+                <input type="number" name="max_kb" value="20" min="5" max="5000" required>
+            </div>
+        </div>
+
+        <div class="upload-box" id="dropZone" onclick="document.getElementById('fileInput').click()">
+            <span id="upload-icon" style="font-size: 40px;">📸</span><br>
+            <strong id="upload-text" style="display:inline-block; margin-top:10px; color:#1e3a8a;">Click to select student photos</strong>
+            <p id="upload-subtext" style="margin: 5px 0 0 0; font-size: 13px; color: #666;">Supports batch processing for multiple images</p>
+            <div id="file-status"></div>
+            <input type="file" id="fileInput" name="photos" accept="image/*" style="display:none;" multiple required>
+        </div>
+        
+        <button type="submit" class="btn">Process & Download Batch (.ZIP)</button>
+    </form>
+
+    <div class="ad-space">
+        [Google Advertisement - Bottom Banner]
+    </div>
+</div>
+
+<script>
+    const fileInput = document.getElementById('fileInput');
+    const dropZone = document.getElementById('dropZone');
+    const uploadIcon = document.getElementById('upload-icon');
+    const uploadText = document.getElementById('upload-text');
+    const uploadSubtext = document.getElementById('upload-subtext');
+    const fileStatus = document.getElementById('file-status');
+    
+    const uploadForm = document.getElementById('uploadForm');
+    const loadingOverlay = document.getElementById('loadingOverlay');
+    const timeRemainingBox = document.getElementById('timeRemainingBox');
+
+    let globalFileCount = 0;
+
+    // Monitor when files are selected to update card style and count
+    fileInput.addEventListener('change', function() {
+        globalFileCount = this.files.length;
+        if (globalFileCount > 0) {
+            dropZone.classList.add('has-files');
+            uploadIcon.textContent = "✅";
+            uploadText.textContent = "Photos Loaded Successfully!";
+            uploadSubtext.textContent = "Ready to format based on your parameters.";
+            
+            if (globalFileCount === 1) {
+                fileStatus.textContent = `Selected: ${this.files[0].name}`;
+            } else {
+                fileStatus.textContent = `🔥 Ready to process ${globalFileCount} images in bulk!`;
+            }
+        }
+    });
+
+    // Intercept submit, calculate approximate time matrix, and launch dynamic countdown
+    uploadForm.addEventListener('submit', function() {
+        loadingOverlay.style.display = 'flex';
+        
+        // Assume roughly 2.5 seconds per photo on modern multi-threaded CPU
+        let secondsLeft = Math.ceil(globalFileCount * 2.5);
+        
+        if (secondsLeft < 60) {
+            timeRemainingBox.textContent = `⏱️ Estimated time remaining: ~${secondsLeft} seconds`;
+        } else {
+            let minutes = Math.floor(secondsLeft / 60);
+            let remainderSeconds = secondsLeft % 60;
+            timeRemainingBox.textContent = `⏱️ Estimated time remaining: ~${minutes}m ${remainderSeconds}s`;
+        }
+
+        // Run a real-time countdown clock every second so the number ticks down visually!
+        const countdownInterval = setInterval(() => {
+            secondsLeft--;
+            if (secondsLeft <= 1) {
+                timeRemainingBox.textContent = "⚡ Finishing up folder archiving... almost ready!";
+                clearInterval(countdownInterval);
+            } else if (secondsLeft < 60) {
+                timeRemainingBox.textContent = `⏱️ Estimated time remaining: ~${secondsLeft} seconds`;
+            } else {
+                let minutes = Math.floor(secondsLeft / 60);
+                let remainderSeconds = secondsLeft % 60;
+                timeRemainingBox.textContent = `⏱️ Estimated time remaining: ~${minutes}m ${remainderSeconds}s`;
+            }
+        }, 1000);
+    });
+</script>
+
+</body>
+</html>
