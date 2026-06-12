@@ -1,107 +1,93 @@
 import os
+import io
 import zipfile
-from flask import Flask, render_template, request, send_file
-from PIL import Image, ImageOps
-from rembg import remove
-from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor
+from threading import Semaphore
+from flask import Flask, request, render_template, send_file
+from PIL import Image
+from rembg import remove, new_session
 
 app = Flask(__name__)
 
-# We create a thread pool worker group (handles up to 4 photos at the exact same time)
-executor = ThreadPoolExecutor(max_workers=4)
+# CRITICAL FIX: Limit the server to processing exactly ONE image at a time
+# This stops the 512MB RAM from overflowing on Render's free tier
+memory_guard = Semaphore(1)
 
-TARGET_SIZE = (600, 800)
-MAX_FILE_SIZE_KB = 20
+# Pre-initialize a lightweight model session to save memory space
+try:
+    ai_session = new_session("u2net_slim")  # Using the ultra-lightweight AI model
+except Exception:
+    ai_session = None
 
-def process_single_image(file_data, filename, target_size, user_max_kb):
-    """Processes a single image matrix out of the main thread loop."""
-    try:
-        # AI Background Removal
-        subject_only_data = remove(file_data)
-        subject_img = Image.open(BytesIO(subject_only_data)).convert("RGBA")
-        
-        # Auto Crop bounding boxes
-        bbox = subject_img.getbbox()
-        if bbox:
-            subject_img = subject_img.crop(bbox)
+def process_single_image(file_bytes, target_width, target_height, max_kb):
+    """Processes a single image cleanly within strict memory boundaries."""
+    with memory_guard:  # Forces images to wait in line politely
+        # 1. Remove background using our lightweight session
+        if ai_session:
+            subject_only_data = remove(file_bytes, session=ai_session)
+        else:
+            subject_only_data = remove(file_bytes)
             
-        # Zoom and Fit
-        filled_subject = ImageOps.fit(subject_img, target_size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.3))
+        img = Image.open(io.BytesIO(subject_only_data)).convert("RGBA")
         
-        # Canvas Creation
-        white_bg = Image.new("RGBA", target_size, (255, 255, 255, 255))
-        white_bg.paste(filled_subject, (0, 0), filled_subject)
-        final_img = white_bg.convert("RGB")
+        # 2. Resize maintaining proportion or matching requested grid
+        img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
         
-        # Compression Loop
+        # 3. Compress to match maximum KB size rules dynamically
+        output_io = io.BytesIO()
+        img_rgb = img.convert("RGB") # Remove alpha layer for JPEG compression if needed
+        
         quality = 95
-        img_buffer = BytesIO()
-        while quality > 5:
-            img_buffer.seek(0)
-            img_buffer.truncate(0)
-            final_img.save(img_buffer, format="JPEG", quality=quality)
-            if (len(img_buffer.getvalue()) / 1024) <= user_max_kb:
+        while quality > 10:
+            output_io.seek(0)
+            output_io.truncate(0)
+            img_rgb.save(output_io, format="JPEG", quality=quality)
+            if output_io.tell() <= max_kb * 1024:
                 break
             quality -= 5
-        else:
-            img_buffer.seek(0)
-            img_buffer.truncate(0)
-            final_img.save(img_buffer, format="JPEG", quality=5)
-
-        img_buffer.seek(0)
-        original_base = os.path.splitext(filename)[0]
-        return f"{original_base}_custom.jpg", img_buffer.getvalue()
-    except Exception as e:
-        print(f"Error processing {filename}: {str(e)}")
-        return None
+            
+        return output_io.getvalue()
 
 @app.route('/')
-def home():
+def index():
     return render_template('index.html')
 
 @app.route('/process_bulk', methods=['POST'])
-def process_bulk_images():
-    try:
-        user_width = int(request.form.get('width', 600))
-        user_height = int(request.form.get('height', 800))
-        user_max_kb = int(request.form.get('max_kb', 20))
-    except ValueError:
-        return "Invalid numeric dimensions entered.", 400
-
-    target_size = (user_width, user_height)
-
+def process_bulk():
     if 'photos' not in request.files:
         return "No files uploaded", 400
         
     files = request.files.getlist('photos')
-    if not files or files[0].filename == '':
-        return "No files selected", 400
-
-    # Read all files into memory quickly before processing
-    uploaded_data = [(f.read(), f.filename) for f in files if f.filename != '']
-
-    # Submit all image jobs to our ThreadPool parallel lanes
-    futures = [
-        executor.submit(process_single_image, data, name, target_size, user_max_kb)
-        for data, name in uploaded_data
-    ]
-
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for future in futures:
-            result = future.result()  # Gathers the finished photo data
-            if result:
-                img_name, img_bytes = result
-                zip_file.writestr(img_name, img_bytes)
-
-    zip_buffer.seek(0)
+    target_width = int(request.form.get('width', 600))
+    target_height = int(request.form.get('height', 800))
+    max_kb = int(request.form.get('max_kb', 20))
+    
+    zip_io = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_io, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for idx, file in enumerate(files):
+            if file.filename == '':
+                continue
+                
+            file_bytes = file.read()
+            try:
+                processed_bytes = process_single_image(file_bytes, target_width, target_height, max_kb)
+                
+                # Create clean unique naming layout
+                filename = f"student_photo_{idx+1}.jpg"
+                zip_file.writestr(filename, processed_bytes)
+            except Exception as e:
+                print(f"Skipping broken photo entry {idx}: {str(e)}")
+                continue
+                
+    zip_io.seek(0)
     return send_file(
-        zip_buffer,
+        zip_io,
         mimetype='application/zip',
         as_attachment=True,
-        download_name="custom_processed_photos.zip"
+        download_name='processed_student_photos.zip'
     )
 
-if __name__ == "__main__":
-    app.run(debug=True)
+if __name__ == '__main__':
+    # Ensure port matches cloud environment metrics
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
